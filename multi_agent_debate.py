@@ -53,7 +53,7 @@ prefix_start = 'You are in support of {}. You are in a debate with {} over the t
 
 def classify(question):
     try:
-        return llm.invoke("classify the sentiment of input as {} or {}. Output just the class. Input:{}".format('_'.join(classes[0].split(' ')), '_'.join(classes[1].split(' ')), question)).content.strip()
+        return llm2.invoke("classify the sentiment of input as {} or {}. Output just the class. Input:{}".format('_'.join(classes[0].split(' ')), '_'.join(classes[1].split(' ')), question)).content.strip()
     except Exception as e:
         print(f"Error classifying input: {e}")
         return "_".join(classes[0].split(' '))  # Fallback
