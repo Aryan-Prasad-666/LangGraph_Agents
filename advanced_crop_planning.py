@@ -72,6 +72,7 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
         location: str
         plan_duration: int
         soil_data: Optional[Dict]
+        climate_data: Optional[Dict]
         crop_plan: Optional[str]
         history: List[str]
         iteration: int
@@ -81,24 +82,24 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
 
     data_collection_prompt = (
         "You are an agricultural expert tasked with summarizing crop suitability for {location} over a {plan_duration}-month period. "
-        "Use the provided search results: {search_results}, and soil data: {soil_data}. "
-        "If search results are unavailable or irrelevant, use your knowledge to summarize crop suitability based on the soil data "
-        "(loamy soil, pH 6.5, high nitrogen, medium phosphorus, low potassium, adequate moisture). "
-        "Provide a concise summary (one paragraph, 100-150 words) of suitable crops and considerations for the specified duration."
+        "Use the provided search results: {search_results}, soil data: {soil_data}, and climate data: {climate_data}. "
+        "If search results are unavailable or irrelevant, use your knowledge to summarize crop suitability based on the provided soil and climate data. "
+        "Provide a concise summary (one paragraph, 100-150 words) of suitable crops and considerations for the specified duration, "
+        "considering both soil conditions and climate patterns."
     )
 
     planning_prompt = (
         "You are an agricultural planner for {location} over a {plan_duration}-month period. "
-        "Based on the data summary: {data_summary}, and conversation history: {history}, "
+        "Based on the data summary: {data_summary}, soil data: {soil_data}, climate data: {climate_data}, and conversation history: {history}, "
         "propose a crop plan (one paragraph) including specific crops, planting schedules, and considerations, "
-        "ensuring it aligns with the soil conditions and plan duration, and counters or builds on previous plans."
+        "ensuring it aligns with the soil conditions, climate patterns, and plan duration, and counters or builds on previous plans."
     )
 
     summarizer_prompt = (
         "You are a summarizer agent. "
         "Given the conversation history: {history}, "
-        "create a concise, final crop plan (one paragraph) in JSON format for a {plan_duration}-month period, "
-        "selecting the best elements from all proposals, considering soil data: {soil_data} for {location}. "
+        "create a concise, final crop plan in JSON format for a {plan_duration}-month period, "
+        "selecting the best elements from all proposals, considering soil data: {soil_data} and climate data: {climate_data} for {location}. "
         "Ensure the output is valid JSON without Markdown code fences (e.g., ```json). "
         "Return only the JSON string."
     )
@@ -106,23 +107,30 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
     @lru_cache(maxsize=100)
     def collect_data(location: str, plan_duration: int, soil_data: str) -> str:
         try:
-            query = f"crop suitability in {location} for {plan_duration}-month period"
+            query = f"climate and weather forecast for {location} next {plan_duration} months"
             search_results = serper.invoke({"query": query})
+            
+            climate_query = f"agricultural climate suitability {location} next {plan_duration} months"
+            climate_search = serper.invoke({"query": climate_query})
+            
             prompt = data_collection_prompt.format(
                 location=location,
                 plan_duration=plan_duration,
                 search_results=json.dumps(search_results),
-                soil_data=soil_data
+                soil_data=soil_data,
+                climate_data=json.dumps(climate_search)
             )
             result = llm_gemini.invoke(prompt).content
             result = sanitize_text(result)
             if not result or result.strip() == "" or "error" in result.lower():
                 default_summary = (
                     f"In {location} for a {plan_duration}-month period, the loamy soil with a pH of 6.5, high nitrogen, medium phosphorus, "
-                    f"and low potassium supports crops like wheat, rice, chickpeas, and mustard. Adequate moisture levels suit these crops, "
-                    f"but potassium supplementation is advised to optimize yields. Crop rotation with legumes like chickpeas enhances soil nitrogen, "
-                    f"while mustard improves soil structure. For a {plan_duration}-month plan, prioritize crops like wheat and chickpeas for rabi season "
-                    f"or rice for kharif season, depending on the timeframe, with fertilizers to address potassium deficiency."
+                    f"and low potassium supports crops like wheat, rice, chickpeas, and mustard. The expected climate includes moderate temperatures "
+                    f"around 25°C with seasonal variations, adequate rainfall during monsoon periods, and cooler winters suitable for rabi crops. "
+                    f"Adequate moisture levels suit these crops, but potassium supplementation is advised to optimize yields. "
+                    f"Crop rotation with legumes like chickpeas enhances soil nitrogen, while mustard improves soil structure. "
+                    f"For a {plan_duration}-month plan, prioritize crops like wheat and chickpeas for rabi season or rice for kharif season, "
+                    f"depending on the timeframe, with fertilizers to address potassium deficiency and irrigation planning based on seasonal rainfall."
                 )
                 logger.warning("No valid search results; using default summary")
                 return default_summary
@@ -132,10 +140,12 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
             logger.error(f"Error in data collection: {e}")
             default_summary = (
                 f"In {location} for a {plan_duration}-month period, the loamy soil with a pH of 6.5, high nitrogen, medium phosphorus, "
-                f"and low potassium supports crops like wheat, rice, chickpeas, and mustard. Adequate moisture levels suit these crops, "
-                f"but potassium supplementation is advised to optimize yields. Crop rotation with legumes like chickpeas enhances soil nitrogen, "
-                f"while mustard improves soil structure. For a {plan_duration}-month plan, prioritize crops like wheat and chickpeas for rabi season "
-                f"or rice for kharif season, depending on the timeframe, with fertilizers to address potassium deficiency."
+                f"and low potassium supports crops like wheat, rice, chickpeas, and mustard. The expected climate includes moderate temperatures "
+                f"around 25°C with seasonal variations, adequate rainfall during monsoon periods, and cooler winters suitable for rabi crops. "
+                f"Adequate moisture levels suit these crops, but potassium supplementation is advised to optimize yields. "
+                f"Crop rotation with legumes like chickpeas enhances soil nitrogen, while mustard improves soil structure. "
+                f"For a {plan_duration}-month plan, prioritize crops like wheat and chickpeas for rabi season or rice for kharif season, "
+                f"depending on the timeframe, with fertilizers to address potassium deficiency and irrigation planning based on seasonal rainfall."
             )
             return default_summary
 
@@ -148,6 +158,7 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
         )
         return {
             "soil_data": soil_data,
+            "climate_data": {"forecast": f"Climate data for {state['location']} next {state['plan_duration']} months"},
             "history": state['history'] + [f"Data Summary: {data_summary}"],
             "iteration": state['iteration']
         }
@@ -156,7 +167,14 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
         try:
             data_summary = state['history'][-1] if state['history'] else "No data available"
             history = "\n".join(state['history'])
-            prompt = planning_prompt.format(location=state['location'], plan_duration=state['plan_duration'], data_summary=data_summary, history=history)
+            prompt = planning_prompt.format(
+                location=state['location'], 
+                plan_duration=state['plan_duration'], 
+                data_summary=data_summary, 
+                history=history,
+                soil_data=json.dumps(state['soil_data']),
+                climate_data=json.dumps(state['climate_data'])
+            )
             plan = f"Grok Plan: {sanitize_text(llm_grok.invoke(prompt).content)}"
             logger.info(f"Grok plan: {plan}")
             return {
@@ -176,7 +194,14 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
         try:
             data_summary = state['history'][-1] if state['history'] else "No data available"
             history = "\n".join(state['history'])
-            prompt = planning_prompt.format(location=state['location'], plan_duration=state['plan_duration'], data_summary=data_summary, history=history)
+            prompt = planning_prompt.format(
+                location=state['location'], 
+                plan_duration=state['plan_duration'], 
+                data_summary=data_summary, 
+                history=history,
+                soil_data=json.dumps(state['soil_data']),
+                climate_data=json.dumps(state['climate_data'])
+            )
             plan = f"Gemini Plan: {sanitize_text(llm_gemini.invoke(prompt).content)}"
             logger.info(f"Gemini plan: {plan}")
             return {
@@ -196,7 +221,14 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
         try:
             data_summary = state['history'][-1] if state['history'] else "No data available"
             history = "\n".join(state['history'])
-            prompt = planning_prompt.format(location=state['location'], plan_duration=state['plan_duration'], data_summary=data_summary, history=history)
+            prompt = planning_prompt.format(
+                location=state['location'], 
+                plan_duration=state['plan_duration'], 
+                data_summary=data_summary, 
+                history=history,
+                soil_data=json.dumps(state['soil_data']),
+                climate_data=json.dumps(state['climate_data'])
+            )
             plan = f"GPT Plan: {sanitize_text(llm_gpt.invoke(prompt).content)}"
             logger.info(f"GPT plan: {plan}")
             return {
@@ -218,6 +250,7 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
             prompt = summarizer_prompt.format(
                 history=history,
                 soil_data=json.dumps(state['soil_data']),
+                climate_data=json.dumps(state['climate_data']),
                 location=state['location'],
                 plan_duration=state['plan_duration']
             )
@@ -272,6 +305,7 @@ try:
         "location": location,
         "plan_duration": plan_duration,
         "soil_data": None,
+        "climate_data": None,
         "crop_plan": None,
         "history": [],
         "iteration": 0,
