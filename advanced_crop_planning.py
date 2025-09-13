@@ -25,7 +25,7 @@ serper_key = os.getenv('serper_api_key')
 if not all([groq_key, gemini_key, cohere_key, serper_key]):
     raise ValueError("Missing one or more API keys in environment variables")
 
-llm_grok = ChatGroq(
+llm_deepseek = ChatGroq(
     model="deepseek-r1-distill-llama-70b",
     api_key=groq_key,
     temperature=0.6
@@ -126,7 +126,7 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
                 default_summary = (
                     f"In {location} for a {plan_duration}-month period, the loamy soil with a pH of 6.5, high nitrogen, medium phosphorus, "
                     f"and low potassium supports crops like wheat, rice, chickpeas, and mustard. The expected climate includes moderate temperatures "
-                    f"around 25°C with seasonal variations, adequate rainfall during monsoon periods, and cooler winters suitable for rabi crops. "
+                    f"around 25C with seasonal variations, adequate rainfall during monsoon periods, and cooler winters suitable for rabi crops. "
                     f"Adequate moisture levels suit these crops, but potassium supplementation is advised to optimize yields. "
                     f"Crop rotation with legumes like chickpeas enhances soil nitrogen, while mustard improves soil structure. "
                     f"For a {plan_duration}-month plan, prioritize crops like wheat and chickpeas for rabi season or rice for kharif season, "
@@ -141,7 +141,7 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
             default_summary = (
                 f"In {location} for a {plan_duration}-month period, the loamy soil with a pH of 6.5, high nitrogen, medium phosphorus, "
                 f"and low potassium supports crops like wheat, rice, chickpeas, and mustard. The expected climate includes moderate temperatures "
-                f"around 25°C with seasonal variations, adequate rainfall during monsoon periods, and cooler winters suitable for rabi crops. "
+                f"around 25C with seasonal variations, adequate rainfall during monsoon periods, and cooler winters suitable for rabi crops. "
                 f"Adequate moisture levels suit these crops, but potassium supplementation is advised to optimize yields. "
                 f"Crop rotation with legumes like chickpeas enhances soil nitrogen, while mustard improves soil structure. "
                 f"For a {plan_duration}-month plan, prioritize crops like wheat and chickpeas for rabi season or rice for kharif season, "
@@ -163,7 +163,7 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
             "iteration": state['iteration']
         }
 
-    def grok_planning_node(state: CropPlanState) -> CropPlanState:
+    def deepseek_planning_node(state: CropPlanState) -> CropPlanState:
         try:
             data_summary = state['history'][-1] if state['history'] else "No data available"
             history = "\n".join(state['history'])
@@ -175,18 +175,18 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
                 soil_data=json.dumps(state['soil_data']),
                 climate_data=json.dumps(state['climate_data'])
             )
-            plan = f"Grok Plan: {sanitize_text(llm_grok.invoke(prompt).content)}"
-            logger.info(f"Grok plan: {plan}")
+            plan = f"DeepSeek Plan: {sanitize_text(llm_deepseek.invoke(prompt).content)}"
+            logger.info(f"DeepSeek plan: {plan}")
             return {
                 "crop_plan": plan,
                 "history": state['history'] + [plan],
                 "iteration": state['iteration'] + 1
             }
         except Exception as e:
-            logger.error(f"Error in Grok planning: {e}")
+            logger.error(f"Error in DeepSeek planning: {e}")
             return {
-                "crop_plan": "Error generating Grok plan",
-                "history": state['history'] + ["Grok Plan: Error"],
+                "crop_plan": "Error generating DeepSeek plan",
+                "history": state['history'] + ["DeepSeek Plan: Error"],
                 "iteration": state['iteration'] + 1
             }
 
@@ -263,24 +263,24 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
             return {"final_plan": "Error generating final plan"}
 
     workflow.add_node("data_collection", data_collection_node)
-    workflow.add_node("grok_planning", grok_planning_node)
+    workflow.add_node("deepseek_planning", deepseek_planning_node)
     workflow.add_node("gemini_planning", gemini_planning_node)
     workflow.add_node("gpt_planning", gpt_planning_node)
     workflow.add_node("summarizer", summarizer_node)
 
     workflow.set_entry_point("data_collection")
-    workflow.add_edge("data_collection", "grok_planning")
-    workflow.add_edge("grok_planning", "gemini_planning")
+    workflow.add_edge("data_collection", "deepseek_planning")
+    workflow.add_edge("deepseek_planning", "gemini_planning")
     workflow.add_edge("gemini_planning", "gpt_planning")
 
     def check_iterations(state: CropPlanState) -> str:
         logger.debug(f"Iteration count: {state['iteration']}/{max_iterations}")
-        return "summarizer" if state['iteration'] >= max_iterations else "grok_planning"
+        return "summarizer" if state['iteration'] >= max_iterations else "deepseek_planning"
 
     workflow.add_conditional_edges(
         "gpt_planning",
         check_iterations,
-        {"summarizer": "summarizer", "grok_planning": "grok_planning"}
+        {"summarizer": "summarizer", "deepseek_planning": "deepseek_planning"}
     )
     workflow.add_edge("summarizer", END)
 
@@ -330,7 +330,7 @@ try:
             "max_iterations": 3,
             "models": {
                 "data_collection": "gemini-2.5-flash",
-                "grok_planning": "deepseek-r1-distill-llama-70b",
+                "deepseek_planning": "deepseek-r1-distill-llama-70b",
                 "gemini_planning": "gemini-2.5-flash",
                 "gpt_planning": "openai/gpt-oss-120b",
                 "summarizer": "cohere"
