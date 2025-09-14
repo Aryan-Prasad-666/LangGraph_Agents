@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crop Planning App</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 font-sans">
+    <div class="container mx-auto p-4">
+        <h1 class="text-3xl font-bold text-center mb-6">Crop Planning App</h1>
+        <div class="max-w-md mx-auto bg-white p-6 rounded-lg shadow-md">
+            <div class="mb-4">
+                <label for="location" class="block text-sm font-medium text-gray-700">Location (e.g., Punjab, India)</label>
+                <input type="text" id="location" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" required>
+            </div>
+            <div class="mb-4">
+                <label for="plan_duration" class="block text-sm font-medium text-gray-700">Plan Duration (months)</label>
+                <input type="number" id="plan_duration" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" required>
+            </div>
+            <div class="mb-4">
+                <label for="language" class="block text-sm font-medium text-gray-700">Language</label>
+                <select id="language" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                    <option value="English">English</option>
+                    <option value="Hindi">Hindi</option>
+                    <option value="Kannada">Kannada</option>
+                    <option value="Malayalam">Malayalam</option>
+                </select>
+            </div>
+            <button onclick="generatePlan()" class="w-full bg-indigo-600 text-white py-2 px-4 rounded-md hover:bg-indigo-700">Generate Crop Plan</button>
+        </div>
+        <div id="result" class="mt-6 max-w-2xl mx-auto bg-white p-6 rounded-lg shadow-md hidden">
+            <h2 class="text-2xl font-semibold mb-4">Crop Plan Result</h2>
+            <div id="history" class="mb-4"></div>
+            <h3 class="text-xl font-medium mb-2">Final Crop Plan</h3>
+            <p id="final_plan" class="text-gray-700"></p>
+        </div>
+        <div id="error" class="mt-6 max-w-2xl mx-auto bg-red-100 p-6 rounded-lg shadow-md hidden">
+            <h2 class="text-2xl font-semibold text-red-700 mb-4">Error</h2>
+            <p id="error_message" class="text-red-700"></p>
+        </div>
+    </div>
+    <script>
+        async function generatePlan() {
+            const location = document.getElementById('location').value;
+            const plan_duration = document.getElementById('plan_duration').value;
+            const language = document.getElementById('language').value;
+
+            if (!location || !plan_duration || !language) {
+                showError("Please fill in all fields");
+                return;
+            }
+
+            document.getElementById('result').classList.add('hidden');
+            document.getElementById('error').classList.add('hidden');
+
+            try {
+                const response = await fetch('/generate_plan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ location, plan_duration, language })
+                });
+                const data = await response.json();
+
+                if (response.ok) {
+                    const resultDiv = document.getElementById('result');
+                    const historyDiv = document.getElementById('history');
+                    const finalPlanDiv = document.getElementById('final_plan');
+
+                    historyDiv.innerHTML = '<h3 class="text-xl font-medium mb-2">Planning History</h3>' + 
+                        data.conversation.history.map(entry => `<p class="text-gray-600">${entry}</p>`).join('');
+                    finalPlanDiv.textContent = data.conversation.final_plan;
+                    resultDiv.classList.remove('hidden');
+                } else {
+                    showError(data.error || 'Failed to generate crop plan');
+                }
+            } catch (error) {
+                showError('An error occurred while generating the crop plan');
+            }
+        }
+
+        function showError(message) {
+            const errorDiv = document.getElementById('error');
+            const errorMessage = document.getElementById('error_message');
+            errorMessage.textContent = message;
+            errorDiv.classList.remove('hidden');
+        }
+    </script>
+</body>
+</html>
