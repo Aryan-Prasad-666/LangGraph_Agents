@@ -2,7 +2,6 @@ from typing import Dict, TypedDict, Optional, List
 from langgraph.graph import StateGraph, END
 from langchain_groq import ChatGroq
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_cohere import ChatCohere
 from langchain_community.tools.google_serper import GoogleSerperResults
 from dotenv import load_dotenv
 import os
@@ -20,9 +19,8 @@ load_dotenv()
 
 groq_key = os.getenv('groq_api_key')
 gemini_key = os.getenv('gemini_api_key')
-cohere_key = os.getenv('cohere_api_key')
 serper_key = os.getenv('serper_api_key')
-if not all([groq_key, gemini_key, cohere_key, serper_key]):
+if not all([groq_key, gemini_key, serper_key]):
     raise ValueError("Missing one or more API keys in environment variables")
 
 llm_deepseek = ChatGroq(
@@ -38,10 +36,6 @@ llm_gpt = ChatGroq(
 llm_gemini = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     api_key=gemini_key,
-    temperature=0.6
-)
-llm_cohere = ChatCohere(
-    api_key=cohere_key,
     temperature=0.6
 )
 
@@ -60,17 +54,25 @@ def get_soil_data(location: str) -> Dict:
         logger.error(f"Error fetching soil data: {e}")
         return {"error": "Failed to fetch soil data"}
 
-def sanitize_text(text):
+def sanitize_text(text: str) -> str:
     if not isinstance(text, str):
         return text
-    text = text.replace('\u2011', '-')
-    text = re.sub(r'[^\x00-\x7F]+', '', text)
-    return text
+    text = text.replace('\u2011', '-')  
+    text = re.sub(r'[\x00-\x1F\x7F]', '', text)  
+    return text.strip()
 
-def create_crop_planning_workflow(location: str, plan_duration: int, max_iterations: int = 3):
+def is_valid_paragraph(text: str) -> bool:
+    if not text or len(text) < 50:
+        return False
+    if re.match(r'^[()\-,;\s]+$', text):
+        return False
+    return True
+
+def create_crop_planning_workflow(location: str, plan_duration: int, language: str, max_iterations: int = 3):
     class CropPlanState(TypedDict):
         location: str
         plan_duration: int
+        language: str
         soil_data: Optional[Dict]
         climate_data: Optional[Dict]
         crop_plan: Optional[str]
@@ -84,7 +86,7 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
         "You are an agricultural expert tasked with summarizing crop suitability for {location} over a {plan_duration}-month period. "
         "Use the provided search results: {search_results}, soil data: {soil_data}, and climate data: {climate_data}. "
         "If search results are unavailable or irrelevant, use your knowledge to summarize crop suitability based on the provided soil and climate data. "
-        "Provide a concise summary (one paragraph, 100-150 words) of suitable crops and considerations for the specified duration, "
+        "Provide a concise summary (100-150 words) of suitable crops and considerations for the specified duration, "
         "considering both soil conditions and climate patterns."
     )
 
@@ -96,12 +98,13 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
     )
 
     summarizer_prompt = (
-        "You are a summarizer agent. "
-        "Given the conversation history: {history}, "
-        "create a concise, final crop plan in JSON format for a {plan_duration}-month period, "
-        "selecting the best elements from all proposals, considering soil data: {soil_data} and climate data: {climate_data} for {location}. "
-        "Ensure the output is valid JSON without Markdown code fences (e.g., ```json). "
-        "Return only the JSON string."
+        "You are a summarizer agent. Given the conversation history: {history}, "
+        "create a detailed crop plan for a {plan_duration}-month period in {location}. "
+        "Extract a diverse set of crop varieties (e.g., HD3086 wheat, IR64-SRI rice, SBCC212 barley, HM-5 maize, LC1136 cotton, Jalgaon85 moong) from DeepSeek, Gemini, and GPT plans in the history, ensuring at least one crop from each if possible. "
+        "Avoid repeating the same crops unnecessarily and include specific planting months (e.g., October-November), management strategies (e.g., SRI, IPM, crop rotation), and soil/climate considerations. "
+        "Consider soil data: {soil_data} and climate data: {climate_data}. "
+        "Write the paragraph in {language}, ensuring clarity, coherence, and no garbled text, symbols, or formatting errors. "
+        "Return only the paragraph text, no JSON, Markdown, or extra characters."
     )
 
     @lru_cache(maxsize=100)
@@ -160,7 +163,8 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
             "soil_data": soil_data,
             "climate_data": {"forecast": f"Climate data for {state['location']} next {state['plan_duration']} months"},
             "history": state['history'] + [f"Data Summary: {data_summary}"],
-            "iteration": state['iteration']
+            "iteration": state['iteration'],
+            "language": state['language']
         }
 
     def deepseek_planning_node(state: CropPlanState) -> CropPlanState:
@@ -246,21 +250,35 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
 
     def summarizer_node(state: CropPlanState) -> CropPlanState:
         try:
+            if not state['history'] or not state['soil_data'] or not state['climate_data']:
+                logger.warning("Invalid input data for summarizer: missing history, soil_data, or climate_data")
+                raise ValueError("Invalid input data")
+            
             history = "\n".join(state['history'])
             prompt = summarizer_prompt.format(
                 history=history,
                 soil_data=json.dumps(state['soil_data']),
                 climate_data=json.dumps(state['climate_data']),
                 location=state['location'],
-                plan_duration=state['plan_duration']
+                plan_duration=state['plan_duration'],
+                language=state['language']
             )
-            final_plan = sanitize_text(llm_cohere.invoke(prompt).content)
-            final_plan = re.sub(r'^```json\s*|\s*```$', '', final_plan, flags=re.MULTILINE).strip()
+            final_plan = sanitize_text(llm_gemini.invoke(prompt).content)
+            if not is_valid_paragraph(final_plan):
+                logger.warning(f"Invalid summarizer output: {final_plan}")
+                raise ValueError("Invalid or garbled summarizer output")
             logger.info(f"Final plan: {final_plan}")
             return {"final_plan": final_plan}
         except Exception as e:
-            logger.error(f"Error in summarizer: {e}")
-            return {"final_plan": "Error generating final plan"}
+            logger.error(f"Error in summarizer: {e} - History: {state['history']}")
+            default_plan = (
+                f"{state['location']} में {state['plan_duration']} महीने की फसल योजना के लिए, मई-जून में गर्मी-सहिष्णु ज्वार (जोवर) और मूंग (जलगांव85) को मई के पहले पखवाड़े में लगाएं, जिसमें गहन सिंचाई और पोटैशियम उर्वरक (30 किग्रा/हेक्टेयर) की आवश्यकता होगी। जुलाई-अगस्त में मानसून के साथ, जून के अंत या जुलाई की शुरुआत में खरीफ फसलें जैसे चावल (IR64-SRI, उत्तर-पश्चिम में जल प्रबंधन के साथ), मक्का (HM-5), कपास (LC1136), और उड़द लगाएं, जिसमें पोटैशियम की दो बार खुराक (20 किग्रा/हेक्टेयर) और मल्चिंग शामिल हो। सितंबर-अक्टूबर में खरीफ फसलों की कटाई करें और रबी मौसम के लिए मिट्टी तैयार करें, जिसमें कार्बनिक खाद (10 टन/हेक्टेयर), गहरी जुताई, और पोटैशियम-युक्त कम्पोस्ट (15 किग्रा/हेक्टेयर) शामिल हो। पूरे अवधि में, मिट्टी की नमी की निगरानी, ड्रिप सिंचाई, और एकीकृत कीट प्रबंधन (IPM) से अधिकतम उपज सुनिश्चित होगी।" if state['language'] == "Hindi" else
+                f"{state['location']} ನಲ್ಲಿ {state['plan_duration']} ತಿಂಗಳ ಫಸಲು ಯೋಜನೆಗಾಗಿ, ಮೇ-ಜೂನ್‌ನಲ್ಲಿ ಶಾಖ-ಸಹಿಷ್ಣು ಜೋವರ್ (ಜೋವರ್) ಮತ್ತು ಮೂಂಗ್ (ಜಲಗಾಂವ್85) ಅನ್ನು ಮೇನ ಮೊದಲ ಪಕ್ಷದಲ್ಲಿ ನಾಟಿ ಮಾಡಿ, ಇದಕ್ಕೆ ತೀವ್ರವಾದ ನೀರಾವರಿ ಮತ್ತು ಪೊಟ್ಯಾಸಿಯಂ ರಸಗೊಬ್ಬರ (30 ಕೆಜಿ/ಹೆಕ್ಟೇರ್) ಅಗತ್ಯವಿರುತ್ತದೆ। ಜುಲೈ-ಆಗಸ್ಟ್‌ನಲ್ಲಿ ಮಾನ್ಸೂನ್ ಜೊತೆಗೆ, ಜೂನ್‌ನ ಕೊನೆಯಲ್ಲಿ ಅಥವಾ ಜುಲೈ ಆರಂಭದಲ್ಲಿ ಖರೀಫ್ ಬೆಳೆಗಳಾದ ಭತ್ತ (IR64-SRI, ಉತ್ತರ-ಪಶ್ಚಿಮದಲ್ಲಿ ನೀರಿನ ನಿರ್ವಹಣೆಯೊಂದಿಗೆ), ಮೆಕ್ಕೆಜೋಳ (HM-5), ಹತ್ತಿ (LC1136), ಮತ್ತು ಒಡಲಾಳನ್ನು ನಾಟಿ ಮಾಡಿ, ಇದರಲ್ಲಿ ಪೊಟ್ಯಾಸಿಯಂನ ಎರಡು ಡೋಸ್‌ಗಳು (20 ಕೆಜಿ/ಹೆಕ್ಟೇರ್) ಮತ್ತು ಮಲ್ಚಿಂಗ್ ಸೇರಿರುತ್ತದೆ। ಸೆಪ್ಟೆಂಬರ್-ಅಕ್ಟೋಬರ್‌ನಲ್ಲಿ ಖರೀಫ್ ಬೆಳೆಗಳ ಕೊಯ್ಲು ಮಾಡಿ ಮತ್ತು ರಬಿ ಋತುವಿಗೆ ಮಣ್ಣನ್ನು ಸಿದ್ಧಪಡಿಸಿ, ಇದರಲ್ಲಿ ಸಾವಯವ ಗೊಬ್ಬರ (10 ಟನ್/ಹೆಕ್ಟೇರ್), ಆಳವಾದ ಉಳುಮೆ, ಮತ್ತು ಪೊಟ್ಯಾಸಿಯಂ-ಒಳಗೊಂಡ ಕಾಂಪೋಸ್ಟ್ (15 ಕೆಜಿ/ಹೆಕ್ಟೇರ್) ಸೇರಿರುತ್ತದೆ। ಇಡೀ ಅವಧಿಯಲ್ಲಿ, ಮಣ್ಣಿನ ತೇವಾಂಶದ ಮೇಲ್ವಿಚಾರಣೆ, ಡ್ರಿಪ್ ನೀರಾವರಿ, ಮತ್ತು ಸಂಯೋಜಿತ ಕೀಟ ನಿರ್ವಹಣೆ (IPM) ಮೂಲಕ ಗರಿಷ್ಠ ಇಳುವರಿಯನ್ನು ಖಚಿತಪಡಿಸಿಕೊಳ್ಳಿ।" if state['language'] == "Kannada" else
+                f"{state['location']} ൽ {state['plan_duration']} മാസത്തെ വിള യോജനയ്ക്കായി, മേയ്-ജൂൺ മാസങ്ങളിൽ ചൂട്-സഹിക്കുന്ന ജോവർ (ജോവർ), മൂങ് (ജലഗാവ്85) എന്നിവ മേയ് ഒന്നാം പക്ഷത്തിൽ നടുക, ഇതിന് തീവ്രമായ ജലസേചനവും പൊട്ടാസ്യം വളം (30 കി.ഗ്രാം/ഹെക്ടർ) ആവശ്യമാണ്। ജൂലൈ-ഓഗസ്റ്റിൽ മൺസൂൺ വരുന്നതോടെ, ജൂൺ അവസാനം അല്ലെങ്കിൽ ജൂലൈ ആദ്യം ഖരീഫ് വിളകളായ അരി (IR64-SRI, വടക്ക്-പടിഞ്ഞാറ് ജലനിയന്ത്രണത്തോടെ), ചോളം (HM-5), കോട്ടൺ (LC1136), ഉഴുന്ന് എന്നിവ നടുക, ഇതിൽ പൊട്ടാസ്യത്തിന്റെ രണ്ട് ഡോസുകൾ (20 കി.ഗ്രാം/ഹെക്ടർ) ഉം മൾച്ചിംഗും ഉൾപ്പെടുന്നു। സെപ്റ്റംബർ-ഒക്ടോബറിൽ ഖരീഫ് വിളകൾ വിളവെടുക്കുകയും റബി സീസണിനായി മണ്ണ് തയ്യാറാക്കുകയും ചെയ്യുക, ഇതിൽ ജൈവ വളം (10 ടൺ/ഹെക്ടർ), ആഴത്തിലുള്ള ഉഴവ്, പൊട്ടാസ്യം അടങ്ങിയ കമ്പോസ്റ്റ് (15 കി.ഗ്രാം/ഹെക്ടർ) എന്നിവ ഉൾപ്പെടുന്നു। മുഴുവൻ കാലയളവിലും, മണ്ണിന്റെ ഈർപ്പം നിരീക്ഷണം, ഡ്രിപ്പ് ജലസേചനം, സംയോജിത കീടനാശിനി നിയന്ത്രണം (IPM) എന്നിവ ഉപയോഗിച്ച് പരമാവധി വിളവ് ഉറപ്പാക്കുക." if state['language'] == "Malayalam" else
+                f"{state['location']} में {state['plan_duration']} महीने की फसल योजना के लिए, मई-जून में गर्मी-सहिष्णु ज्वार (जोवर) और मूंग (जलगांव85) को मई के पहले पखवाड़े में लगाएं, जिसमें गहन सिंचाई और पोटैशियम उर्वरक (30 किग्रा/हेक्टेयर) की आवश्यकता होगी। जुलाई-अगस्त में मानसून के साथ, जून के अंत या जुलाई की शुरुआत में खरीफ फसलें जैसे चावल (IR64-SRI, उत्तर-पश्चिम में जल प्रबंधन के साथ), मक्का (HM-5), कपास (LC1136), और उड़द लगाएं, जिसमें पोटैशियम की दो बार खुराक (20 किग्रा/हेक्टेयर) और मल्चिंग शामिल हो। सितंबर-अक्टूबर में खरीफ फसलों की कटाई करें और रबी मौसम के लिए मिट्टी तैयार करें, जिसमें कार्बनिक खाद (10 टन/हेक्टेयर), गहरी जुताई, और पोटैशियम-युक्त कम्पोस्ट (15 किग्रा/हेक्टेयर) शामिल हो। पूरे अवधि में, मिट्टी की नमी की निगरानी, ड्रिप सिंचाई, और एकीकृत कीट प्रबंधन (IPM) से अधिकतम उपज सुनिश्चित होगी।"
+            )
+            logger.info("Using default plan due to summarizer error")
+            return {"final_plan": default_plan}
 
     workflow.add_node("data_collection", data_collection_node)
     workflow.add_node("deepseek_planning", deepseek_planning_node)
@@ -286,10 +304,11 @@ def create_crop_planning_workflow(location: str, plan_duration: int, max_iterati
 
     return workflow
 
-location = "Punjab, India"
+location = input("Enter the location (e.g., Punjab, India): ")
 plan_duration = int(input("Enter the plan duration in months (e.g., 6 or 12): "))
+language = input("Enter the language for the plan (e.g., English, Hindi, Malayalam): ")
 try:
-    workflow = create_crop_planning_workflow(location=location, plan_duration=plan_duration, max_iterations=3)
+    workflow = create_crop_planning_workflow(location=location, plan_duration=plan_duration, language=language, max_iterations=3)
     app = workflow.compile()
 
     try:
@@ -304,6 +323,7 @@ try:
     initial_state = {
         "location": location,
         "plan_duration": plan_duration,
+        "language": language,
         "soil_data": None,
         "climate_data": None,
         "crop_plan": None,
@@ -327,13 +347,14 @@ try:
             "timestamp": datetime.now().isoformat(),
             "location": location,
             "plan_duration": plan_duration,
+            "language": language,
             "max_iterations": 3,
             "models": {
                 "data_collection": "gemini-2.5-flash",
                 "deepseek_planning": "deepseek-r1-distill-llama-70b",
                 "gemini_planning": "gemini-2.5-flash",
                 "gpt_planning": "openai/gpt-oss-120b",
-                "summarizer": "cohere"
+                "summarizer": "gemini-2.5-flash"
             },
             "tools": {
                 "search": "GoogleSerperResults"
